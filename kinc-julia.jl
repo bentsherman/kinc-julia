@@ -809,7 +809,7 @@ end
 
 
 
-function similarity(
+function similarity_kernel(
     x, y,
     clusmethod,
     corrmethod,
@@ -901,6 +901,147 @@ end
 
 
 
+function write_pair(
+    i, j,
+    K,
+    labels,
+    correlations,
+    mincorr,
+    maxcorr,
+    outfile
+)
+    # determine number of valid correlations
+    valid = [(!isnan(r) && mincorr <= abs(r) && abs(r) <= maxcorr) for r in correlations]
+    n_clusters = sum(valid)
+    cluster_idx = 1
+
+    # write each correlation to output file
+    for k in 1:K
+        corr = correlations[k]
+
+        # make sure correlation meets thresholds
+        if valid[k]
+            # compute sample mask
+            y_k = copy(labels)
+
+            # y_k[(y_k >= 0) & (y_k != k)] = 0
+            # y_k[y_k == k] = 1
+            # y_k[y_k < 0] *= -1
+            for i in 1:length(y_k)
+                if y_k[i] >= 0 && y_k[i] != k
+                    y_k[i] = 0
+                end
+                if y_k[i] == k
+                    y_k[i] = 1
+                end
+                if y_k[i] < 0
+                    y_k[i] *= -1
+                end
+            end
+
+            sample_mask = join(y_k, "")
+
+            # compute summary statistics
+            n_samples = sum([y == 1 for y in y_k])
+
+            # write correlation to output file
+            join(outfile, [i, j, cluster_idx, n_clusters, n_samples, corr, sample_mask], "\t")
+            write(outfile, "\n")
+
+            # increment cluster index
+            cluster_idx += 1
+        end
+    end
+end
+
+
+
+function similarity_cpu(
+    emx,
+    clusmethod,
+    corrmethod,
+    preout,
+    postout,
+    minexpr,
+    maxexpr,
+    minsamp,
+    minclus,
+    maxclus,
+    criterion,
+    mincorr,
+    maxcorr,
+    outfile
+)
+    # initialize workspace
+    N = size(emx, 2)
+    N_pow2 = next_power_2(N)
+    K = maxclus
+
+    x_sorted = Array{Float64}(undef, N_pow2)
+    y_sorted = Array{Float64}(undef, N_pow2)
+
+    gmm = GMM(
+        #= data =#       Array{Vector2}(undef, N),
+        #= labels =#     Array{Int8}(undef, N),
+        #= pi =#         Array{Float64}(undef, K),
+        #= mu =#         Array{Vector2}(undef, K),
+        #= sigma =#      Array{Matrix2x2}(undef, K),
+        #= sigmaInv =#   Array{Matrix2x2}(undef, K),
+        #= normalizer =# Array{Float64}(undef, K),
+        #= MP =#         Array{Vector2}(undef, K),
+        #= counts =#     Array{Int64}(undef, K),
+        #= logpi =#      Array{Float64}(undef, K),
+        #= gamma =#      Array{Float64}(undef, N, K),
+        #= logL =#       0,
+        #= entropy =#    0
+    )
+
+    labels = Array{Int8}(undef, N)
+    correlations = Array{Float64}(undef, K)
+
+    # process each gene pair
+    for i in 1:size(emx, 1)
+        println(i)
+
+        for j in 1:(i - 1)
+            # extract pairwise data
+            x = emx[i, :]
+            y = emx[j, :]
+
+            # compute pairwise similarity
+            K = similarity_kernel(
+                x, y,
+                clusmethod,
+                corrmethod,
+                preout,
+                postout,
+                minexpr,
+                maxexpr,
+                minsamp,
+                minclus,
+                maxclus,
+                criterion,
+                x_sorted,
+                y_sorted,
+                gmm,
+                labels,
+                correlations)
+
+            # save pairwise results
+            write_pair(
+                i, j,
+                K,
+                labels,
+                correlations,
+                mincorr,
+                maxcorr,
+                outfile)
+        end
+    end
+end
+
+
+
 function main()
     # define input parameters
     args_input = "Yeast-100.emx.txt"
@@ -928,62 +1069,47 @@ function main()
 
     emx = Matrix{Float64}(csv[:, 2:size(csv, 2)])
 
-    # initialize workspace
-    N = size(emx, 2)
-    N_pow2 = next_power_2(N)
-    K = args_maxclus
+    # initialize output file
+    outfile = open(args_output, "w")
 
-    x_sorted = Array{Float64}(undef, N_pow2)
-    y_sorted = Array{Float64}(undef, N_pow2)
+    # run similarity
+    if args_gpu
+        # similarity_gpu(
+        #     emx,
+        #     args_clusmethod,
+        #     args_corrmethod,
+        #     args_preout,
+        #     args_postout,
+        #     args_minexpr,
+        #     args_maxexpr,
+        #     args_minsamp,
+        #     args_minclus,
+        #     args_maxclus,
+        #     args_criterion,
+        #     args_mincorr,
+        #     args_maxcorr,
+        #     args_gsize,
+        #     args_lsize,
+        #     outfile
+        # )
 
-    gmm = GMM(
-        #= data =#       Array{Vector2}(undef, N),
-        #= labels =#     Array{Int8}(undef, N),
-        #= pi =#         Array{Float64}(undef, K),
-        #= mu =#         Array{Vector2}(undef, K),
-        #= sigma =#      Array{Matrix2x2}(undef, K),
-        #= sigmaInv =#   Array{Matrix2x2}(undef, K),
-        #= normalizer =# Array{Float64}(undef, K),
-        #= MP =#         Array{Vector2}(undef, K),
-        #= counts =#     Array{Int64}(undef, K),
-        #= logpi =#      Array{Float64}(undef, K),
-        #= gamma =#      Array{Float64}(undef, N, K),
-        #= logL =#       0,
-        #= entropy =#    0
-    )
-
-    labels = Array{Int8}(undef, N)
-    correlations = Array{Float64}(undef, K)
-
-    # process each gene pair
-    for i in 1:size(emx, 1)
-        for j in 1:(i - 1)
-            # extract pairwise data
-            x = emx[i, :]
-            y = emx[j, :]
-
-            # compute pairwise similarity
-            K = similarity(
-                x, y,
-                args_clusmethod,
-                args_corrmethod,
-                args_preout,
-                args_postout,
-                args_minexpr,
-                args_maxexpr,
-                args_minsamp,
-                args_minclus,
-                args_maxclus,
-                args_criterion,
-                x_sorted,
-                y_sorted,
-                gmm,
-                labels,
-                correlations)
-
-            # print results
-            println(i, ' ', j, ' ', correlations[1:K])
-        end
+    else
+        similarity_cpu(
+            emx,
+            args_clusmethod,
+            args_corrmethod,
+            args_preout,
+            args_postout,
+            args_minexpr,
+            args_maxexpr,
+            args_minsamp,
+            args_minclus,
+            args_maxclus,
+            args_criterion,
+            args_mincorr,
+            args_maxcorr,
+            outfile
+        )
     end
 end
 
