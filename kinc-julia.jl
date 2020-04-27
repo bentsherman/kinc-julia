@@ -1,5 +1,8 @@
 using CSV
 using DataFrames
+using CUDAdrv
+using CUDAnative
+using CuArrays
 
 
 
@@ -141,17 +144,19 @@ function mark_outliers(x, y, labels, k, marker, x_sorted, y_sorted)
     bitonic_sort(y_sorted)
 
     # compute quartiles and thresholds for each axis
-    Q1_x = x_sorted[n * 1 // 4]
-    Q3_x = x_sorted[n * 3 // 4]
+    Q1_x = x_sorted[1 + div(n * 1, 4)]
+    Q3_x = x_sorted[1 + div(n * 3, 4)]
     T_x_min = Q1_x - 1.5 * (Q3_x - Q1_x)
     T_x_max = Q3_x + 1.5 * (Q3_x - Q1_x)
 
-    Q1_y = y_sorted[n * 1 // 4]
-    Q3_y = y_sorted[n * 3 // 4]
+    Q1_y = y_sorted[1 + div(n * 1, 4)]
+    Q3_y = y_sorted[1 + div(n * 3, 4)]
     T_y_min = Q1_y - 1.5 * (Q3_y - Q1_y)
     T_y_max = Q3_y + 1.5 * (Q3_y - Q1_y)
 
     # mark outliers
+    n = 0
+
     for i in 1:length(labels)
         if labels[i] == k
             outlier_x = (x[i] < T_x_min || T_x_max < x[i])
@@ -159,6 +164,8 @@ function mark_outliers(x, y, labels, k, marker, x_sorted, y_sorted)
 
             if outlier_x || outlier_y
                 labels[i] = marker
+            elseif labels[i] >= 0
+                n += 1
             end
         end
     end
@@ -282,7 +289,7 @@ end
 
 
 
-struct GMM
+struct GMM_cpu
     data       ::Array{Vector2}
     labels     ::Array{Int8}
     pi         ::Array{Float64}
@@ -296,6 +303,24 @@ struct GMM
     gamma      ::Array{Float64, 2}
     logL       ::Array{Float64}
     entropy    ::Array{Float64}
+end
+
+
+
+struct GMM_gpu
+    data       ::CuArray{Vector2}
+    labels     ::CuArray{Int8}
+    pi         ::CuArray{Float64}
+    mu         ::CuArray{Vector2}
+    sigma      ::CuArray{Matrix2x2}
+    sigmaInv   ::CuArray{Matrix2x2}
+    normalizer ::CuArray{Float64}
+    MP         ::CuArray{Vector2}
+    counts     ::CuArray{Int64}
+    logpi      ::CuArray{Float64}
+    gamma      ::CuArray{Float64, 2}
+    logL       ::CuArray{Float64}
+    entropy    ::CuArray{Float64}
 end
 
 
@@ -349,7 +374,7 @@ end
 function gmm_initialize_means(gmm, X, N, K)
     max_iterations = 20
     tolerance = 1e-3
-    
+
     # initialize workspace
     MP = gmm.MP
     counts = gmm.counts
@@ -492,7 +517,7 @@ function gmm_compute_mstep(gmm, X, N, K)
         end
 
         vector_scale(gmm.mu[k], 1.0 / n_k)
-        
+
         # update covariance matrix
         gmm.sigma[k] = Matrix2x2(0, 0, 0, 0)
 
@@ -825,8 +850,8 @@ function similarity_kernel(
     y_sorted,
     gmm,
     labels,
-    correlations
-)
+    correlations)
+
     # fetch pairwise data
     n_samples = fetch_pair(
         x, y,
@@ -908,8 +933,8 @@ function write_pair(
     correlations,
     mincorr,
     maxcorr,
-    outfile
-)
+    outfile)
+
     # determine number of valid correlations
     valid = [(!isnan(r) && mincorr <= abs(r) && abs(r) <= maxcorr) for r in correlations]
     n_clusters = sum(valid)
@@ -970,8 +995,8 @@ function similarity_cpu(
     criterion,
     mincorr,
     maxcorr,
-    outfile
-)
+    outfile)
+
     # initialize workspace
     N = size(emx, 2)
     N_pow2 = next_power_2(N)
@@ -980,7 +1005,7 @@ function similarity_cpu(
     x_sorted = Array{Float64}(undef, N_pow2)
     y_sorted = Array{Float64}(undef, N_pow2)
 
-    gmm = GMM(
+    gmm = GMM_cpu(
         #= data =#       Array{Vector2}(undef, N),
         #= labels =#     Array{Int8}(undef, N),
         #= pi =#         Array{Float64}(undef, K),
@@ -1001,7 +1026,7 @@ function similarity_cpu(
 
     # process each gene pair
     for i in 1:size(emx, 1)
-        println(i)
+        # println(i)
 
         for j in 1:(i - 1)
             # extract pairwise data
@@ -1042,15 +1067,273 @@ end
 
 
 
+struct PairwiseIndex
+    x::Int64
+    y::Int64
+end
+
+
+
+function pairwise_increment(index)
+    x = index.x
+    y = index.y + 1
+    if x == y
+        x += 1
+        y = 1
+    end
+    return PairwiseIndex(x, y)
+end
+
+
+
+function similarity_gpu_helper(
+    n_pairs,
+    in_emx,
+    in_index,
+    clusmethod,
+    corrmethod,
+    preout,
+    postout,
+    minexpr,
+    maxexpr,
+    minsamp,
+    minclus,
+    maxclus,
+    criterion,
+    work_x,
+    work_y,
+    work_gmm_data,
+    work_gmm_labels,
+    work_gmm_pi,
+    work_gmm_mu,
+    work_gmm_sigma,
+    work_gmm_sigmaInv,
+    work_gmm_normalizer,
+    work_gmm_MP,
+    work_gmm_counts,
+    work_gmm_logpi,
+    work_gmm_gamma,
+    work_gmm_logL,
+    work_gmm_entropy,
+    out_K,
+    out_labels,
+    out_correlations)
+
+    # get global index
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if i > n_pairs
+        return
+    end
+
+    # initialize workspace variables
+    index = in_index[i]
+    x = in_emx[index.x, :]
+    y = in_emx[index.y, :]
+    x_sorted = work_x[index.x, :]
+    y_sorted = work_y[index.y, :]
+
+    gmm = GMM_gpu(
+        #= data =#       work_gmm_data[i, :],
+        #= labels =#     work_gmm_labels[i, :],
+        #= pi =#         work_gmm_pi[i, :],
+        #= mu =#         work_gmm_mu[i, :],
+        #= sigma =#      work_gmm_sigma[i, :],
+        #= sigmaInv =#   work_gmm_sigmaInv[i, :],
+        #= normalizer =# work_gmm_normalizer[i, :],
+        #= MP =#         work_gmm_MP[i, :],
+        #= counts =#     work_gmm_counts[i, :],
+        #= logpi =#      work_gmm_logpi[i, :],
+        #= gamma =#      work_gmm_gamma[i, :, :],
+        #= logL =#       work_gmm_logL[i, :],
+        #= entropy =#    work_gmm_entropy[i, :]
+    )
+
+    labels = out_labels[i, :]
+    correlations = out_correlations[i, :]
+
+    # save number of clusters
+    out_K[i] = similarity_kernel(
+        x, y,
+        clusmethod,
+        corrmethod,
+        preout,
+        postout,
+        minexpr,
+        maxexpr,
+        minsamp,
+        minclus,
+        maxclus,
+        criterion,
+        x_sorted,
+        y_sorted,
+        gmm,
+        labels,
+        correlations)
+
+    return
+end
+
+
+
+function similarity_gpu(
+    emx,
+    clusmethod,
+    corrmethod,
+    preout,
+    postout,
+    minexpr,
+    maxexpr,
+    minsamp,
+    minclus,
+    maxclus,
+    criterion,
+    mincorr,
+    maxcorr,
+    gsize,
+    lsize,
+    outfile)
+
+    # allocate device buffers
+    W = gsize
+    N = size(emx, 2)
+    N_pow2 = next_power_2(N)
+    K = maxclus
+
+    in_emx               = CuArray(emx)
+    in_index_cpu         = Array{PairwiseIndex}(undef, W)
+    in_index_gpu         = CuArray(in_index_cpu)
+    work_x               = CuArray{Float64}(undef, W, N_pow2)
+    work_y               = CuArray{Float64}(undef, W, N_pow2)
+    work_gmm_data        = CuArray{Vector2}(undef, W, N)
+    work_gmm_labels      = CuArray{Int8}(undef, W, N)
+    work_gmm_pi          = CuArray{Float64}(undef, W, K)
+    work_gmm_mu          = CuArray{Vector2}(undef, W, K)
+    work_gmm_sigma       = CuArray{Matrix2x2}(undef, W, K)
+    work_gmm_sigmaInv    = CuArray{Matrix2x2}(undef, W, K)
+    work_gmm_normalizer  = CuArray{Float64}(undef, W, K)
+    work_gmm_MP          = CuArray{Vector2}(undef, W, K)
+    work_gmm_counts      = CuArray{Int64}(undef, W, K)
+    work_gmm_logpi       = CuArray{Float64}(undef, W, K)
+    work_gmm_gamma       = CuArray{Float64}(undef, W, N, K)
+    work_gmm_logL        = CuArray{Float64}(undef, W, 1)
+    work_gmm_entropy     = CuArray{Float64}(undef, W, 1)
+    out_K_cpu            = Array{Int8}(undef, W)
+    out_K_gpu            = CuArray(out_K_cpu)
+    out_labels_cpu       = Array{Int8}(undef, W, N)
+    out_labels_gpu       = CuArray(out_labels_cpu)
+    out_correlations_cpu = Array{Float64}(undef, W, K)
+    out_correlations_gpu = CuArray(out_correlations_cpu)
+
+    # iterate through global work blocks
+    n_genes = size(emx, 1)
+    n_total_pairs = div(n_genes * (n_genes - 1), 2)
+
+    base_index = PairwiseIndex(2, 1)
+
+    for i in 1 : gsize : n_total_pairs
+        # println(i, " ", n_total_pairs)
+
+        # determine number of pairs
+        n_pairs = min(gsize, n_total_pairs - i + 1)
+
+        # initialize index array
+        index = base_index
+
+        for j in 1:n_pairs
+            in_index_cpu[j] = index
+            index = pairwise_increment(index)
+        end
+
+        # copy index array to device
+        copyto!(in_index_gpu, in_index_cpu)
+
+        # execute similarity kernel
+        @cuda blocks=div(gsize, lsize) threads=lsize similarity_gpu_helper(
+            n_pairs,
+            in_emx,
+            in_index_gpu,
+            clusmethod,
+            corrmethod,
+            preout,
+            postout,
+            minexpr,
+            maxexpr,
+            minsamp,
+            minclus,
+            maxclus,
+            criterion,
+            work_x,
+            work_y,
+            work_gmm_data,
+            work_gmm_labels,
+            work_gmm_pi,
+            work_gmm_mu,
+            work_gmm_sigma,
+            work_gmm_sigmaInv,
+            work_gmm_normalizer,
+            work_gmm_MP,
+            work_gmm_counts,
+            work_gmm_logpi,
+            work_gmm_gamma,
+            work_gmm_logL,
+            work_gmm_entropy,
+            out_K_gpu,
+            out_labels_gpu,
+            out_correlations_gpu
+        )
+        CUDAdrv.synchronize()
+
+        # copy results from device
+        copyto!(out_K_cpu, out_K_gpu)
+        copyto!(out_labels_cpu, out_labels_gpu)
+        copyto!(out_correlations_cpu, out_correlations_gpu)
+
+        # save correlation matrix to output file
+        index = base_index
+
+        for j in 1:n_pairs
+            # extract pairwise results
+            K = out_K_cpu[j]
+            labels = out_labels_cpu[j]
+            correlations = out_correlations_cpu[j, 1:K]
+
+            # save pairwise results
+            write_pair(
+                index.x,
+                index.y,
+                K,
+                labels,
+                correlations,
+                mincorr,
+                maxcorr,
+                outfile)
+
+            # increment pairwise index
+            index = pairwise_increment(index)
+        end
+
+        # update local pairwise index
+        base_index = index
+    end
+end
+
+
+
 function main()
+    if length(ARGS) != 3
+        println("usage: ./kinc-julia.jl <infile> <outfile> <gpu>")
+        return
+    end
+
     # define input parameters
-    args_input = "Yeast-100.emx.txt"
-    args_output = "Yeast-100.cmx.txt"
-    args_gpu = false
+    args_input = ARGS[1]
+    args_output = ARGS[2]
+    args_gpu = parse(Bool, ARGS[3])
     args_clusmethod = CLUSMETHOD_GMM
     args_corrmethod = CORRMETHOD_SPEARMAN
-    args_preout = false
-    args_postout = false
+    args_preout = true
+    args_postout = true
     args_minexpr = 0.0
     args_maxexpr = 20.0
     args_minsamp = 30
@@ -1074,24 +1357,24 @@ function main()
 
     # run similarity
     if args_gpu
-        # similarity_gpu(
-        #     emx,
-        #     args_clusmethod,
-        #     args_corrmethod,
-        #     args_preout,
-        #     args_postout,
-        #     args_minexpr,
-        #     args_maxexpr,
-        #     args_minsamp,
-        #     args_minclus,
-        #     args_maxclus,
-        #     args_criterion,
-        #     args_mincorr,
-        #     args_maxcorr,
-        #     args_gsize,
-        #     args_lsize,
-        #     outfile
-        # )
+        similarity_gpu(
+            emx,
+            args_clusmethod,
+            args_corrmethod,
+            args_preout,
+            args_postout,
+            args_minexpr,
+            args_maxexpr,
+            args_minsamp,
+            args_minclus,
+            args_maxclus,
+            args_criterion,
+            args_mincorr,
+            args_maxcorr,
+            args_gsize,
+            args_lsize,
+            outfile
+        )
 
     else
         similarity_cpu(
