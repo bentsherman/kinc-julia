@@ -653,11 +653,11 @@ function gmm_compute(
 
     if n_samples >= min_samples
         # extract clean samples from data array
-        j = 0
+        j = 1
         for i in 1:length(x)
             if labels[i] >= 0
-                j += 1
                 gmm.data[j] = Vector2(x[i], y[i])
+                j += 1
             end
         end
 
@@ -687,13 +687,13 @@ function gmm_compute(
             if value < bestValue
                 bestK = K
                 bestValue = value
-                
+
                 # save labels for clean samples
-                j = 0
+                j = 1
                 for i in 1:length(x)
                     if labels[i] >= 0
-                        j += 1
                         labels[i] = gmm.labels[j]
+                        j += 1
                     end
                 end
             end
@@ -953,10 +953,10 @@ function write_pair(
             # y_k[y_k == k] = 1
             # y_k[y_k < 0] *= -1
             for i in 1:length(y_k)
-                if y_k[i] >= 0 && y_k[i] != k
+                if y_k[i] >= 0 && y_k[i] != k - 1
                     y_k[i] = 0
                 end
-                if y_k[i] == k
+                if y_k[i] == k - 1
                     y_k[i] = 1
                 end
                 if y_k[i] < 0
@@ -970,7 +970,7 @@ function write_pair(
             n_samples = sum([y == 1 for y in y_k])
 
             # write correlation to output file
-            join(outfile, [i, j, cluster_idx, n_clusters, n_samples, corr, sample_mask], "\t")
+            join(outfile, [i - 1, j - 1, cluster_idx, n_clusters, n_samples, corr, sample_mask], "\t")
             write(outfile, "\n")
 
             # increment cluster index
