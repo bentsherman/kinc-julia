@@ -177,8 +177,8 @@ end
 
 
 mutable struct Vector2
-    x::Float64
-    y::Float64
+    x::Float32
+    y::Float32
 end
 
 
@@ -194,7 +194,7 @@ end
 
 
 
-function vector_add(a::Vector2, c::Float64, b::Vector2)
+function vector_add(a::Vector2, c::Float32, b::Vector2)
     a.x += c * b.x
     a.y += c * b.y
 end
@@ -208,7 +208,7 @@ end
 
 
 
-function vector_scale(a::Vector2, c::Float64)
+function vector_scale(a::Vector2, c::Float32)
     a.x *= c
     a.y *= c
 end
@@ -228,15 +228,15 @@ end
 
 
 mutable struct Matrix2x2
-    m00::Float64
-    m01::Float64
-    m10::Float64
-    m11::Float64
+    m00::Float32
+    m01::Float32
+    m10::Float32
+    m11::Float32
 end
 
 
 
-function matrix_scale(A::Matrix2x2, c::Float64)
+function matrix_scale(A::Matrix2x2, c::Float32)
     A.m00 *= c
     A.m01 *= c
     A.m10 *= c
@@ -251,7 +251,7 @@ end
 
 
 
-function matrix_inverse(A::Matrix2x2, B::Matrix2x2, det::Float64)
+function matrix_inverse(A::Matrix2x2, B::Matrix2x2, det::Float32)
     B.m00 = +A.m11 / det
     B.m01 = -A.m01 / det
     B.m10 = -A.m10 / det
@@ -267,7 +267,7 @@ end
 
 
 
-function matrix_add_outer_product(A::Matrix2x2, c::Float64, x::Vector2)
+function matrix_add_outer_product(A::Matrix2x2, c::Float32, x::Vector2)
     A.m00 += c * x.x * x.x
     A.m01 += c * x.x * x.y
     A.m10 += c * x.y * x.x
@@ -292,17 +292,17 @@ end
 struct GMM_cpu
     data       ::Array{Vector2}
     labels     ::Array{Int8}
-    pi         ::Array{Float64}
+    pi         ::Array{Float32}
     mu         ::Array{Vector2}
     sigma      ::Array{Matrix2x2}
     sigmaInv   ::Array{Matrix2x2}
-    normalizer ::Array{Float64}
+    normalizer ::Array{Float32}
     MP         ::Array{Vector2}
-    counts     ::Array{Int64}
-    logpi      ::Array{Float64}
-    gamma      ::Array{Float64, 2}
-    logL       ::Array{Float64}
-    entropy    ::Array{Float64}
+    counts     ::Array{Int32}
+    logpi      ::Array{Float32}
+    gamma      ::Array{Float32, 2}
+    logL       ::Array{Float32}
+    entropy    ::Array{Float32}
 end
 
 
@@ -310,17 +310,17 @@ end
 struct GMM_gpu
     data       ::CuArray{Vector2}
     labels     ::CuArray{Int8}
-    pi         ::CuArray{Float64}
+    pi         ::CuArray{Float32}
     mu         ::CuArray{Vector2}
     sigma      ::CuArray{Matrix2x2}
     sigmaInv   ::CuArray{Matrix2x2}
-    normalizer ::CuArray{Float64}
+    normalizer ::CuArray{Float32}
     MP         ::CuArray{Vector2}
-    counts     ::CuArray{Int64}
-    logpi      ::CuArray{Float64}
-    gamma      ::CuArray{Float64, 2}
-    logL       ::CuArray{Float64}
-    entropy    ::CuArray{Float64}
+    counts     ::CuArray{Int32}
+    logpi      ::CuArray{Float32}
+    gamma      ::CuArray{Float32, 2}
+    logL       ::CuArray{Float32}
+    entropy    ::CuArray{Float32}
 end
 
 
@@ -332,7 +332,7 @@ function gmm_initialize_components(gmm, X, N, K)
     # initialize each mixture component
     for k in 1:K
         # initialize mixture weight to uniform distribution
-        gmm.pi[k] = 1.0 / K
+        gmm.pi[k] = 1.0f0 / K
 
         # initialize mean to a random sample from X
         i = myrand!(rs) % N + 1
@@ -363,7 +363,7 @@ function gmm_prepare_components(gmm, K)
         matrix_inverse(gmm.sigma[k], gmm.sigmaInv[k], det)
 
         # compute normalizer term for multivariate normal distribution
-        gmm.normalizer[k] = -0.5 * (D * log(2.0 * pi) + log(det))
+        gmm.normalizer[k] = -0.5f0 * (D * log(2.0f0 * pi) + log(det))
     end
 
     return true
@@ -373,7 +373,7 @@ end
 
 function gmm_initialize_means(gmm, X, N, K)
     max_iterations = 20
-    tolerance = 1e-3
+    tolerance = 1f-3
 
     # initialize workspace
     MP = gmm.MP
@@ -406,12 +406,12 @@ function gmm_initialize_means(gmm, X, N, K)
         # scale each mean by its sample count
         for k in 1:K
             if counts[k] > 0
-                vector_scale(MP[k], 1.0 / counts[k])
+                vector_scale(MP[k], 1.0f0 / counts[k])
             end
         end
 
         # compute the total change of all means
-        diff = 0.0
+        diff = 0.0f0
 
         for k in 1:K
             diff += vector_diff_norm(MP[k], gmm.mu[k])
@@ -456,12 +456,12 @@ function gmm_compute_estep(gmm, X, N, K)
             xmSxm = vector_dot(xm, Sxm)
             
             # compute log(P) = normalizer - 0.5 * xm^T * Sigma^-1 * xm
-            logProb[i, k] = gmm.normalizer[k] - 0.5 * xmSxm
+            logProb[i, k] = gmm.normalizer[k] - 0.5f0 * xmSxm
         end
     end
 
     # compute gamma and log-likelihood
-    logL = 0.0
+    logL = 0.0f0
     
     for i in 1:N
         # compute a = argmax(logpi_k + logProb_ik, k)
@@ -474,7 +474,7 @@ function gmm_compute_estep(gmm, X, N, K)
         end
 
         # compute logpx
-        sum_ = 0.0
+        sum_ = 0.0f0
         for k in 1:K
             sum_ += exp(gmm.logpi[k] + logProb[i, k] - maxArg)
         end
@@ -500,7 +500,7 @@ end
 function gmm_compute_mstep(gmm, X, N, K)
     for k in 1:K
         # compute n_k = sum(gamma_ik)
-        n_k = 0.0
+        n_k = 0.0f0
         
         for i in 1:N
             n_k += gmm.gamma[i, k]
@@ -516,7 +516,7 @@ function gmm_compute_mstep(gmm, X, N, K)
             vector_add(gmm.mu[k], gmm.gamma[i, k], X[i])
         end
 
-        vector_scale(gmm.mu[k], 1.0 / n_k)
+        vector_scale(gmm.mu[k], 1.0f0 / n_k)
 
         # update covariance matrix
         gmm.sigma[k] = Matrix2x2(0, 0, 0, 0)
@@ -530,7 +530,7 @@ function gmm_compute_mstep(gmm, X, N, K)
             matrix_add_outer_product(gmm.sigma[k], gmm.gamma[i, k], xm)
         end
 
-        matrix_scale(gmm.sigma[k], 1.0 / n_k)
+        matrix_scale(gmm.sigma[k], 1.0f0 / n_k)
     end
 end
 
@@ -557,7 +557,7 @@ end
 
 
 function gmm_compute_entropy(gamma, N, labels)
-    E = 0.0
+    E = 0.0f0
     
     for i in 1:N
         k = labels[i]
@@ -578,7 +578,7 @@ function gmm_fit(gmm, X, N, K, labels)
 
     # run EM algorithm
     max_iterations = 100
-    tolerance = 1e-8
+    tolerance = 1f-8
     prevLogL = -Inf
     currLogL = -Inf
 
@@ -1002,27 +1002,27 @@ function similarity_cpu(
     N_pow2 = next_power_2(N)
     K = maxclus
 
-    x_sorted = Array{Float64}(undef, N_pow2)
-    y_sorted = Array{Float64}(undef, N_pow2)
+    x_sorted = Array{Float32}(undef, N_pow2)
+    y_sorted = Array{Float32}(undef, N_pow2)
 
     gmm = GMM_cpu(
         #= data =#       Array{Vector2}(undef, N),
         #= labels =#     Array{Int8}(undef, N),
-        #= pi =#         Array{Float64}(undef, K),
+        #= pi =#         Array{Float32}(undef, K),
         #= mu =#         Array{Vector2}(undef, K),
         #= sigma =#      Array{Matrix2x2}(undef, K),
         #= sigmaInv =#   Array{Matrix2x2}(undef, K),
-        #= normalizer =# Array{Float64}(undef, K),
+        #= normalizer =# Array{Float32}(undef, K),
         #= MP =#         Array{Vector2}(undef, K),
-        #= counts =#     Array{Int64}(undef, K),
-        #= logpi =#      Array{Float64}(undef, K),
-        #= gamma =#      Array{Float64}(undef, N, K),
-        #= logL =#       Array{Float64}(undef, 1),
-        #= entropy =#    Array{Float64}(undef, 1)
+        #= counts =#     Array{Int32}(undef, K),
+        #= logpi =#      Array{Float32}(undef, K),
+        #= gamma =#      Array{Float32}(undef, N, K),
+        #= logL =#       Array{Float32}(undef, 1),
+        #= entropy =#    Array{Float32}(undef, 1)
     )
 
     labels = Array{Int8}(undef, N)
-    correlations = Array{Float64}(undef, K)
+    correlations = Array{Float32}(undef, K)
 
     # process each gene pair
     for i in 1:size(emx, 1)
@@ -1203,26 +1203,26 @@ function similarity_gpu(
     in_emx               = CuArray(emx)
     in_index_cpu         = Array{PairwiseIndex}(undef, W)
     in_index_gpu         = CuArray(in_index_cpu)
-    work_x               = CuArray{Float64}(undef, W, N_pow2)
-    work_y               = CuArray{Float64}(undef, W, N_pow2)
+    work_x               = CuArray{Float32}(undef, W, N_pow2)
+    work_y               = CuArray{Float32}(undef, W, N_pow2)
     work_gmm_data        = CuArray{Vector2}(undef, W, N)
     work_gmm_labels      = CuArray{Int8}(undef, W, N)
-    work_gmm_pi          = CuArray{Float64}(undef, W, K)
+    work_gmm_pi          = CuArray{Float32}(undef, W, K)
     work_gmm_mu          = CuArray{Vector2}(undef, W, K)
     work_gmm_sigma       = CuArray{Matrix2x2}(undef, W, K)
     work_gmm_sigmaInv    = CuArray{Matrix2x2}(undef, W, K)
-    work_gmm_normalizer  = CuArray{Float64}(undef, W, K)
+    work_gmm_normalizer  = CuArray{Float32}(undef, W, K)
     work_gmm_MP          = CuArray{Vector2}(undef, W, K)
-    work_gmm_counts      = CuArray{Int64}(undef, W, K)
-    work_gmm_logpi       = CuArray{Float64}(undef, W, K)
-    work_gmm_gamma       = CuArray{Float64}(undef, W, N, K)
-    work_gmm_logL        = CuArray{Float64}(undef, W, 1)
-    work_gmm_entropy     = CuArray{Float64}(undef, W, 1)
+    work_gmm_counts      = CuArray{Int32}(undef, W, K)
+    work_gmm_logpi       = CuArray{Float32}(undef, W, K)
+    work_gmm_gamma       = CuArray{Float32}(undef, W, N, K)
+    work_gmm_logL        = CuArray{Float32}(undef, W, 1)
+    work_gmm_entropy     = CuArray{Float32}(undef, W, 1)
     out_K_cpu            = Array{Int8}(undef, W)
     out_K_gpu            = CuArray(out_K_cpu)
     out_labels_cpu       = Array{Int8}(undef, W, N)
     out_labels_gpu       = CuArray(out_labels_cpu)
-    out_correlations_cpu = Array{Float64}(undef, W, K)
+    out_correlations_cpu = Array{Float32}(undef, W, K)
     out_correlations_gpu = CuArray(out_correlations_cpu)
 
     # iterate through global work blocks
@@ -1350,7 +1350,7 @@ function main()
     csv = coalesce.(csv, NaN)
     disallowmissing!(csv)
 
-    emx = Matrix{Float64}(csv[:, 2:size(csv, 2)])
+    emx = Matrix{Float32}(csv[:, 2:size(csv, 2)])
 
     # initialize output file
     outfile = open(args_output, "w")
