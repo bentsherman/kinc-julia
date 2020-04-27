@@ -282,7 +282,7 @@ end
 
 
 
-mutable struct GMM
+struct GMM
     data       ::Array{Vector2}
     labels     ::Array{Int8}
     pi         ::Array{Float64}
@@ -294,8 +294,8 @@ mutable struct GMM
     counts     ::Array{Int64}
     logpi      ::Array{Float64}
     gamma      ::Array{Float64, 2}
-    logL       ::Float64
-    entropy    ::Float64
+    logL       ::Array{Float64}
+    entropy    ::Array{Float64}
 end
 
 
@@ -580,9 +580,9 @@ function gmm_fit(gmm, X, N, K, labels)
     end
 
     # save outputs
-    gmm.logL = currLogL
+    gmm.logL[1] = currLogL
     gmm_compute_labels(gmm.gamma, N, K, labels)
-    gmm.entropy = gmm_compute_entropy(gmm.gamma, N, labels)
+    gmm.entropy[1] = gmm_compute_entropy(gmm.gamma, N, labels)
 
     return true
 end
@@ -651,11 +651,11 @@ function gmm_compute(
             value = Inf
 
             if criterion == CRITERION_AIC
-                value = compute_aic(K, 2, gmm.logL)
+                value = compute_aic(K, 2, gmm.logL[1])
             elseif criterion == CRITERION_BIC
-                value = compute_bic(K, 2, gmm.logL, n_samples)
+                value = compute_bic(K, 2, gmm.logL[1], n_samples)
             elseif criterion == CRITERION_ICL
-                value = compute_icl(K, 2, gmm.logL, n_samples, gmm.entropy)
+                value = compute_icl(K, 2, gmm.logL[1], n_samples, gmm.entropy[1])
             end
 
             # save the model with the lowest criterion value
@@ -992,8 +992,8 @@ function similarity_cpu(
         #= counts =#     Array{Int64}(undef, K),
         #= logpi =#      Array{Float64}(undef, K),
         #= gamma =#      Array{Float64}(undef, N, K),
-        #= logL =#       0,
-        #= entropy =#    0
+        #= logL =#       Array{Float64}(undef, 1),
+        #= entropy =#    Array{Float64}(undef, 1)
     )
 
     labels = Array{Int8}(undef, N)
